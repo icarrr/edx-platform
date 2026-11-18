@@ -1069,4 +1069,66 @@ third
       );
     });
   });
+
+  describe('audio shortcut', function() {
+    const BUNNY = 'https://vz-89e131f7-dd6.b-cdn.net/cf947d12-898e-4354-9742-95f6de7bf361/playlist.m3u8';
+
+    it('builds the audio tag from URL, repeat and title', function() {
+      expect(MarkdownEditingDescriptor.audioToXml(`${BUNNY} | repeat=2 | Conversation 1`)).toEqual(
+        `<audio src="${BUNNY}" allow-repeat="2" title="Conversation 1"/>`
+      );
+    });
+
+    it('accepts the URL alone, meaning unlimited replays and the default title', function() {
+      expect(MarkdownEditingDescriptor.audioToXml(BUNNY)).toEqual(`<audio src="${BUNNY}"/>`);
+    });
+
+    it('accepts the parts in any order after the URL', function() {
+      expect(MarkdownEditingDescriptor.audioToXml(`${BUNNY} | Part A | REPEAT = 0`)).toEqual(
+        `<audio src="${BUNNY}" allow-repeat="0" title="Part A"/>`
+      );
+    });
+
+    it('escapes the values', function() {
+      expect(MarkdownEditingDescriptor.audioToXml('https://x/a.mp3?t=1&e=2 | Tom & "Jerry" <1>')).toEqual(
+        '<audio src="https://x/a.mp3?t=1&amp;e=2" title="Tom &amp; &quot;Jerry&quot; &lt;1&gt;"/>'
+      );
+    });
+
+    it('puts the player inside the question, before the choices', function() {
+      const data = MarkdownEditingDescriptor.markdownToXml(`Listen and answer.
+[[audio ${BUNNY} | repeat=2 | Conversation 1]]
+
+>>What does the speaker want to do?<<
+( ) Go to the library
+(x) Visit a friend
+`);
+      expect(data).toXMLEqual(`<problem>
+    <multiplechoiceresponse>
+        <p>Listen and answer.</p>
+        <audio src="${BUNNY}" allow-repeat="2" title="Conversation 1"/>
+        <label>What does the speaker want to do?</label>
+        <choicegroup type="MultipleChoice">
+            <choice correct="false">Go to the library</choice>
+            <choice correct="true">Visit a friend</choice>
+        </choicegroup>
+    </multiplechoiceresponse>
+</problem>`);
+    });
+
+    it('leaves dropdowns working next to an audio', function() {
+      const data = MarkdownEditingDescriptor.markdownToXml(`[[audio https://x/a.mp3 | repeat=1]]
+The speaker wants to [[go home, (visit a friend), audio]].
+`);
+      expect(data).toContain('<audio src="https://x/a.mp3" allow-repeat="1"/>');
+      expect(data).toContain(
+        '<optioninput options="(\'go home\',\'visit a friend\',\'audio\')" correct="visit a friend"/>'
+      );
+    });
+
+    it('only converts the shortcut when it is alone on its line', function() {
+      const data = MarkdownEditingDescriptor.markdownToXml('Type [[audio https://x/a.mp3]] on its own line.');
+      expect(data).not.toContain('<audio');
+    });
+  });
 });

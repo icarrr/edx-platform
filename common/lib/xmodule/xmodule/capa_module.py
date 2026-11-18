@@ -28,6 +28,7 @@ from xblock.scorable import ScorableXBlockMixin, Score
 
 from capa import responsetypes
 from capa.capa_problem import LoncapaProblem, LoncapaSystem
+from capa.customrender import audio_id, parse_allow_repeat
 from capa.inputtypes import Status
 from capa.responsetypes import LoncapaProblemError, ResponseError, StudentInputError
 from capa.util import convert_files_to_filenames, get_inner_html_from_xpath
@@ -167,6 +168,7 @@ class ProblemBlock(
         'js': [
             resource_string(__name__, 'js/src/javascript_loader.js'),
             resource_string(__name__, 'js/src/capa/display.js'),
+            resource_string(__name__, 'js/src/capa/audio.js'),
             resource_string(__name__, 'js/src/collapsible.js'),
             resource_string(__name__, 'js/src/capa/imageinput.js'),
             resource_string(__name__, 'js/src/capa/schematic.js'),
@@ -305,6 +307,11 @@ class ProblemBlock(
     done = Boolean(help=_("Whether the student has answered the problem"), scope=Scope.user_state, default=False)
     seed = Integer(help=_("Random seed for this student"), scope=Scope.user_state)
     last_submission_time = Date(help=_("Last submission time"), scope=Scope.user_state)
+    audio_plays = Dict(
+        help=_("Replay counters of the embedded audio players, keyed by audio id"),
+        scope=Scope.user_state,
+        default={},
+    )
     submission_wait_seconds = Integer(
         display_name=_("Timer Between Attempts"),
         help=_("Seconds a student must wait between submissions for a problem with multiple attempts."),
@@ -415,7 +422,8 @@ class ProblemBlock(
             'problem_show': self.get_answer,
             'score_update': self.update_score,
             'input_ajax': self.handle_input_ajax,
-            'ungraded_response': self.handle_ungraded_response
+            'ungraded_response': self.handle_ungraded_response,
+            'audio_play': self.audio_play,
         }
 
         _ = self.runtime.service(self, "i18n").ugettext
@@ -1251,6 +1259,7 @@ class ProblemBlock(
             'has_saved_answers': self.has_saved_answers,
             'save_message': save_message,
             'submit_disabled_cta': submit_disabled_ctas[0] if submit_disabled_ctas else None,
+            'audio_state': json.dumps(self.audio_plays or {}),
         }
 
         html = self.runtime.render_template('problem.html', context)
@@ -1483,6 +1492,42 @@ class ProblemBlock(
         self.publish_grade(grader_response=True)
 
         return {}  # No AJAX return is needed
+
+    def audio_play(self, data):
+        """
+        Record that the learner started or finished playing an embedded <audio> (see js/src/capa/audio.js).
+
+        `data` holds ``audio_id`` (capa.customrender.audio_id) and ``event``: ``start`` when a new play
+        begins from the start, ``end`` when it finished. Resuming a paused play sends ``start`` again and
+        is not counted. The replay limit comes from the problem XML, never from the request.
+
+        Returns ``{'success': bool, 'allowed': bool, 'state': {'plays': int, 'ended': bool}}``;
+        ``allowed`` is False when a new play would exceed ``allow-repeat``.
+        """
+        key = data.get('audio_id', '')
+        event = data.get('event')
+        element = next((elem for elem in self.lcp.tree.iter('audio') if audio_id(elem) == key), None)
+        if element is None or event not in ('start', 'end'):
+            return {'success': False}
+
+        valid, limit = parse_allow_repeat(element.get('allow-repeat'))
+        saved = self.audio_plays.get(key) or {}
+        state = {'plays': int(saved.get('plays', 0)), 'ended': bool(saved.get('ended', False))}
+        allowed = True
+
+        if event == 'start':
+            in_progress = state['plays'] > 0 and not state['ended']
+            if not in_progress:
+                if not valid or (limit is not None and state['plays'] >= limit + 1):
+                    allowed = False
+                else:
+                    state = {'plays': state['plays'] + 1, 'ended': False}
+        elif state['plays'] > 0:
+            state['ended'] = True
+
+        # Assign a new dict so the field is saved.
+        self.audio_plays = dict(self.audio_plays, **{key: state})
+        return {'success': True, 'allowed': allowed, 'state': state}
 
     def handle_ungraded_response(self, data):
         """
@@ -2094,6 +2139,8 @@ class ProblemBlock(
 
         # Pull in the new problem seed
         self.set_state_from_lcp()
+        # A new attempt gets the embedded audio replays back.
+        self.audio_plays = {}
         self.set_score(self.score_from_lcp(self.lcp))
 
         # Grade may have changed, so publish new value

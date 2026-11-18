@@ -11,7 +11,7 @@ from openedx.core.djangolib.markup import HTML
 
 <div class="problem-progress" id="${ id }-problem-progress"></div>
 
-<div class="problem">
+<div class="problem" data-audio-state="${ audio_state }">
   ${ HTML(problem['html']) }
   <div class="action">
     <input type="hidden" name="problem_id" value="${ problem['name'] }" />

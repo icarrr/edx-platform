@@ -30,6 +30,7 @@ from xblock.scorable import Score
 import xmodule
 from capa import responsetypes
 from capa.correctmap import CorrectMap
+from capa.customrender import audio_id
 from capa.responsetypes import LoncapaProblemError, ResponseError, StudentInputError
 from capa.xqueue_interface import XQueueInterface
 from xmodule.capa_module import ComplexEncoder, ProblemBlock
@@ -3249,3 +3250,129 @@ class ProblemBlockReportGenerationTest(unittest.TestCase):
                 )
             ))
             assert 'Python Error: No Answer Retrieved' in list(report_data[0][1].values())
+
+
+class ProblemBlockEmbeddedAudioTest(unittest.TestCase):
+    """
+    Embedded <audio> in problem XML (capa.customrender.AudioRenderer + js/src/capa/audio.js)
+    must render through ProblemBlock without changing submission or grading.
+    """
+    xml = textwrap.dedent("""\
+        <problem>
+            <p>Listen to the audio and answer the following question.</p>
+            <multiplechoiceresponse>
+                <audio src="https://cdn.example.com/audio/question-01.mp3" allow-repeat="3"/>
+                <label>What does the speaker want to do?</label>
+                <choicegroup type="MultipleChoice">
+                    <choice correct="false">Go to the library</choice>
+                    <choice correct="true">Visit a friend</choice>
+                    <choice correct="false">Buy some food</choice>
+                    <choice correct="false">Attend a meeting</choice>
+                </choicegroup>
+            </multiplechoiceresponse>
+        </problem>
+    """)
+
+    def test_audio_player_script_is_part_of_the_problem_bundle(self):
+        scripts = [script.decode('utf-8') for script in ProblemBlock.preview_view_js['js']]
+        assert any('root.CapaAudio = {' in script for script in scripts)
+        display = next(script for script in scripts if 'Problem.prototype.bind = function' in script)
+        assert 'window.CapaAudio.init(this.el, this.id, {url: this.url})' in display
+        assert 'window.CapaAudio.clear(that.id)' in display
+
+    def test_problem_html_contains_the_player(self):
+        module = CapaFactory.create(xml=self.xml)
+        module.get_problem_html(encapsulate=False)
+        context = module.system.render_template.call_args[0][1]
+        html = context['problem']['html']
+        assert 'class="capa-audio"' in html
+        assert 'data-allow-repeat="3"' in html
+        assert 'src="https://cdn.example.com/audio/question-01.mp3"' in html
+        assert '</audio>' in html
+        # The choice group (rendered by the mocked template) still follows the player.
+        assert html.index('capa-audio__status') < html.index('Test Template HTML')
+
+    def test_submission_and_grading_are_unchanged(self):
+        module = CapaFactory.create(xml=self.xml, attempts=0)
+        with patch('xmodule.capa_module.ProblemBlock.get_problem_html') as mock_html:
+            mock_html.return_value = 'Test HTML'
+            result = module.submit_problem({CapaFactory.input_key(): 'choice_1'})
+        assert result['success'] == 'correct'
+        assert module.attempts == 1
+        assert module.score == Score(raw_earned=1, raw_possible=1)
+
+        module = CapaFactory.create(xml=self.xml, attempts=0)
+        with patch('xmodule.capa_module.ProblemBlock.get_problem_html') as mock_html:
+            mock_html.return_value = 'Test HTML'
+            result = module.submit_problem({CapaFactory.input_key(): 'choice_0'})
+        assert result['success'] == 'incorrect'
+        assert module.score == Score(raw_earned=0, raw_possible=1)
+
+    def _audio_id(self, module):
+        return audio_id(next(module.lcp.tree.iter('audio')))
+
+    def _play(self, module, event='start', key=None):
+        return module.handle_ajax('audio_play', {
+            'audio_id': self._audio_id(module) if key is None else key,
+            'event': event,
+        })
+
+    def test_audio_play_counts_new_plays_only(self):
+        module = CapaFactory.create(xml=self.xml)
+        result = self._play(module)
+        assert result['success'] is True
+        assert result['allowed'] is True
+        assert result['state'] == {'plays': 1, 'ended': False}
+        # Resuming the unfinished play is not a replay.
+        assert self._play(module)['state'] == {'plays': 1, 'ended': False}
+        assert self._play(module, 'end')['state'] == {'plays': 1, 'ended': True}
+        assert self._play(module)['state'] == {'plays': 2, 'ended': False}
+        assert module.audio_plays == {self._audio_id(module): {'plays': 2, 'ended': False}}
+
+    def test_audio_play_enforces_the_limit_from_the_problem_xml(self):
+        module = CapaFactory.create(xml=self.xml.replace('allow-repeat="3"', 'allow-repeat="1"'))
+        for _ in range(2):
+            assert self._play(module)['allowed'] is True
+            self._play(module, 'end')
+        result = self._play(module)
+        assert result['success'] is True
+        assert result['allowed'] is False
+        assert result['state'] == {'plays': 2, 'ended': True}
+
+    def test_audio_play_without_limit_never_refuses(self):
+        module = CapaFactory.create(xml=self.xml.replace(' allow-repeat="3"', ''))
+        for _ in range(20):
+            assert self._play(module)['allowed'] is True
+            self._play(module, 'end')
+        assert module.audio_plays[self._audio_id(module)]['plays'] == 20
+
+    def test_audio_play_end_before_start_is_ignored(self):
+        module = CapaFactory.create(xml=self.xml)
+        assert self._play(module, 'end')['state'] == {'plays': 0, 'ended': False}
+
+    def test_audio_play_rejects_unknown_audio_or_event(self):
+        module = CapaFactory.create(xml=self.xml)
+        assert self._play(module, key='0123456789abcdef')['success'] is False
+        assert self._play(module, event='rewind')['success'] is False
+        assert not module.audio_plays
+
+    def test_audio_counters_are_sent_with_the_problem_html(self):
+        module = CapaFactory.create(xml=self.xml)
+        self._play(module)
+        module.get_problem_html(encapsulate=False)
+        context = module.system.render_template.call_args[0][1]
+        assert json.loads(context['audio_state']) == {self._audio_id(module): {'plays': 1, 'ended': False}}
+        assert 'data-audio-id="{}"'.format(self._audio_id(module)) in context['problem']['html']
+
+    def test_reset_gives_the_replays_back(self):
+        module = CapaFactory.create(xml=self.xml, done=True)
+        self._play(module)
+        with patch('xmodule.capa_module.ProblemBlock.get_problem_html') as mock_html:
+            mock_html.return_value = 'Test HTML'
+            assert module.reset_problem({})['success'] is True
+        assert module.audio_plays == {}
+
+    def test_answer_and_inputs_do_not_include_audio(self):
+        module = CapaFactory.create(xml=self.xml)
+        assert list(module.lcp.inputs.keys()) == [CapaFactory.answer_key()]
+        assert module.lcp.get_question_answers() == {CapaFactory.answer_key(): ['choice_1']}

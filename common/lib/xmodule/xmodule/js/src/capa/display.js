@@ -196,6 +196,11 @@
             this.$('.review-btn').blur(function(ev) {
                 return $(ev.target).addClass('sr');
             });
+            // Embedded <audio> players (audio.js). bind() runs after every render, so the players are rebuilt
+            // from the server's replay counters (data-audio-state) each time the problem HTML is replaced.
+            if (window.CapaAudio) {
+                window.CapaAudio.init(this.el, this.id, {url: this.url});
+            }
             this.bindResetCorrectness();
             if (this.submitButton.length) {
                 this.submitAnswersAndSubmitButton(true);
@@ -697,6 +702,11 @@
                 id: this.id
             }, function(response) {
                 if (response.success) {
+                    // A reset starts a new attempt, so embedded audio players get their replays back (the server
+                    // already cleared its counters). Cleared before render() so no stale resume position remains.
+                    if (window.CapaAudio) {
+                        window.CapaAudio.clear(that.id);
+                    }
                     that.el.trigger('contentChanged', [that.id, response.html, response]);
                     that.render(response.html, that.scroll_to_problem_meta);
                     that.updateProgress(response);
